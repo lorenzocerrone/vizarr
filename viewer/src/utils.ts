@@ -3,6 +3,7 @@ import * as zarr from "zarrita";
 import type * as viv from "@vivjs/types";
 import ZipFileStore from "@zarrita/storage/zip";
 import type { ZarrPixelSource } from "./ZarrPixelSource";
+import { JAZAV_PREFIX, JazavReferenceStore } from "./jazav-store";
 import type { GridLayerProps } from "./layers/grid-layer";
 import type { LabelLayerProps } from "./layers/label-layer";
 import type { ImageLayerProps, MultiscaleImageLayerProps } from "./layers/viv-layers";
@@ -93,6 +94,12 @@ export async function normalizeStore(source: string | zarr.Readable): Promise<za
   if (typeof source === "string") {
     let store: zarr.Readable;
     let path: `/${string}` = "/";
+    // A virtual OME-Zarr is recognised from its metadata, so the prefix is not needed;
+    // it is accepted so that a URL can say what it expects to open.
+    const explicitlyVirtual = source.startsWith(JAZAV_PREFIX);
+    if (explicitlyVirtual) {
+      source = source.slice(JAZAV_PREFIX.length);
+    }
     if (source.endsWith(".json")) {
       // import custom store implementation
       const [{ default: ReferenceStore }, json] = await Promise.all([
@@ -113,9 +120,14 @@ export async function normalizeStore(source: string | zarr.Readable): Promise<za
         // grab the path and then set the URL to the root
         path = ensureAbsolutePath(url.pathname);
         url.pathname = "/";
-        store = new zarr.FetchStore(url.href);
-        log.debug("Store resolved", { source, store: "FetchStore" });
+        // Resolves `jazav.reference` arrays, whose pixels live in files next to the zarr,
+        // and passes everything else through to the FetchStore underneath.
+        store = new JazavReferenceStore(new zarr.FetchStore(url.href));
+        log.debug("Store resolved", { source, store: "FetchStore", referenceResolving: true });
       }
+    }
+    if (explicitlyVirtual && !(store instanceof JazavReferenceStore)) {
+      throw new Error(`${JAZAV_PREFIX} needs a plain http(s) URL to a virtual OME-Zarr directory, not ${source}`);
     }
 
     // Wrap remote stores in a cache

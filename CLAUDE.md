@@ -91,7 +91,7 @@ one and catches what the tests do not.
 
 ## Tests
 
-**`pnpm test` is the offline suite** — 46 tests against fixtures this repository
+**`pnpm test` is the offline suite** — 56 tests against fixtures this repository
 generates, no network at all. It is what CI runs, and it takes about 15 seconds.
 
 **`pnpm test:remote` is the corpus**, which reads real images from IDR and elsewhere.

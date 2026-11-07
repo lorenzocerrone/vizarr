@@ -151,8 +151,7 @@ function writeArrayV3(dir, { channels, height, width }) {
   });
 }
 
-function writeImageV3(dir, { name, channels = 2, size = 32, depth = 2 }) {
-  const levels = levelsFor({ size, depth });
+function writeGroupV3(dir, { name, channels, levels }) {
   // 0.5 moved the version to the `ome` key and dropped it from the blocks beneath.
   const scales = multiscales({ levels, version: undefined, name });
   for (const entry of scales) {
@@ -169,9 +168,120 @@ function writeImageV3(dir, { name, channels = 2, size = 32, depth = 2 }) {
       },
     },
   });
+}
+
+function writeImageV3(dir, { name, channels = 2, size = 32, depth = 2 }) {
+  const levels = levelsFor({ size, depth });
+  writeGroupV3(dir, { name, channels, levels });
   levels.forEach((edge, index) => {
     writeArrayV3(path.join(dir, String(index)), { channels, height: edge, width: edge });
   });
+}
+
+// ---------------------------------------------------------------------------
+// A virtual OME-Zarr, as jazav writes it: level 0 holds reference tables into raw files
+// next to the zarr instead of pixels. See viewer/src/jazav-store.ts for what reads it.
+// ---------------------------------------------------------------------------
+
+/** Bytes of filler before the pixels in each raw file, standing in for a file header. */
+const RAW_HEADER = 64;
+/** The value an inner chunk without a block reads as. Not 0, so that it can be told from a missing read. */
+const VIRTUAL_FILL = 7;
+
+/**
+ * A 2-channel image whose level 0 is a `jazav.reference` array of 16x16 blocks, one
+ * shard (table) per channel. The fixture is built so that each thing the store has to
+ * get right is visible in the pixels it returns:
+ *
+ * - blocks are stored in the raw files in a scrambled order, so a store that read them
+ *   in table order would put tiles in the wrong place;
+ * - channel 1 has no block for its bottom-right tile, which must read as `fill_value`;
+ * - the two raw files differ in size, so a `sizes` check that compared the wrong file
+ *   would fail here.
+ *
+ * `raw/` sits beside `image.zarr`, as jazav lays a dataset out, and the sources are the
+ * same relative paths they would carry on disk.
+ */
+function writeVirtualImageV3(dir, { name, size = 32, block = 16 }) {
+  const channels = 2;
+  const levels = levelsFor({ size, depth: 2 });
+  const imageDir = path.join(dir, "image.zarr");
+  const rawDir = path.join(dir, "raw");
+  writeGroupV3(imageDir, { name, channels, levels });
+
+  const planes = pixels({ channels, height: size, width: size });
+  const tilesPerSide = size / block;
+  // Which tiles each raw file holds, in storage order. Channel 1 leaves one out.
+  const stored = [
+    [
+      [1, 1],
+      [0, 1],
+      [1, 0],
+      [0, 0],
+    ],
+    [
+      [0, 1],
+      [1, 0],
+      [0, 0],
+    ],
+  ];
+  const sizes = [];
+  const tables = [];
+  stored.forEach((tiles, c) => {
+    const file = Buffer.alloc(RAW_HEADER + tiles.length * block * block);
+    file.write(`fixture raw file for channel ${c}; pixels start at byte ${RAW_HEADER}`, 0, "ascii");
+    // One entry per inner chunk in C order over the shard's (1, 1, 1, 2, 2) chunk grid,
+    // which here is row-major over (ty, tx). Unreferenced tiles stay the fill marker.
+    const table = Buffer.alloc(20 * tilesPerSide * tilesPerSide, 0xff);
+    tiles.forEach(([ty, tx], position) => {
+      const offset = RAW_HEADER + position * block * block;
+      for (let y = 0; y < block; y++) {
+        const row = planes[c].subarray(
+          (ty * block + y) * size + tx * block,
+          (ty * block + y) * size + (tx + 1) * block,
+        );
+        file.set(row, offset + y * block);
+      }
+      const entry = (ty * tilesPerSide + tx) * 20;
+      table.writeUInt32LE(c, entry);
+      table.writeBigUInt64LE(BigInt(offset), entry + 4);
+      table.writeBigUInt64LE(BigInt(block * block), entry + 12);
+    });
+    write(path.join(rawDir, `c${c}.bin`), file);
+    sizes.push(file.byteLength);
+    tables.push(table);
+  });
+
+  const level0 = path.join(imageDir, "0");
+  writeJson(path.join(level0, "zarr.json"), {
+    zarr_format: 3,
+    node_type: "array",
+    shape: [1, channels, 1, size, size],
+    data_type: "uint8",
+    // The zarr chunk grid is the shard grid: one table per channel.
+    chunk_grid: { name: "regular", configuration: { chunk_shape: [1, 1, 1, size, size] } },
+    chunk_key_encoding: { name: "default", configuration: { separator: "/" } },
+    fill_value: VIRTUAL_FILL,
+    codecs: [
+      {
+        name: "jazav.reference",
+        configuration: {
+          version: 2,
+          chunk_shape: [1, 1, 1, block, block],
+          sources: ["../../raw/c0.bin", "../../raw/c1.bin"],
+          sizes,
+          codecs: [{ name: "bytes", configuration: { endian: "little" } }],
+        },
+      },
+    ],
+    attributes: {},
+    dimension_names: AXES.map((axis) => axis.name),
+  });
+  tables.forEach((table, c) => {
+    write(path.join(level0, "c", "0", String(c), "0", "0", "0"), table);
+  });
+  // The level above is a plain array, as every level above 0 is in a virtual image.
+  writeArrayV3(path.join(imageDir, "1"), { channels, height: levels[1], width: levels[1] });
 }
 
 // ---------------------------------------------------------------------------
@@ -244,6 +354,7 @@ const fixtures = [
   ["image-v04.zarr", (dir) => writeImageV2(dir, { name: "Local image v0.4" })],
   ["image-v05.zarr", (dir) => writeImageV3(dir, { name: "Local image v0.5" })],
   ["plate-v04.zarr", (dir) => writePlateV2(dir, { name: "Local plate v0.4" })],
+  ["jazav-v05", (dir) => writeVirtualImageV3(dir, { name: "Local virtual image v0.5" })],
 ];
 
 for (const [name, build] of fixtures) {

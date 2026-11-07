@@ -69,6 +69,24 @@ multiscale and multimodal images. Currently, Viv supports `int8`, `int16`,
 `int32`, `uint8`, `uint16`, `uint32`, `float32`, `float64` arrays, but
 contributions are welcome to support more np.dtypes!
 
+## Virtual OME-Zarr
+
+Vizarr opens virtual OME-Zarr images written by [jazav](https://github.com/lorenzocerrone/jazav),
+whose level 0 holds reference tables into the original microscopy files instead of
+pixels, as served: no manifest, no conversion.
+
+```
+https://biongff.github.io/vizarr/?source=https://host/data/image.zarr
+```
+
+Nothing marks the URL; the viewer recognises the `jazav.reference` codec on level 0
+and resolves the references in the browser, reading each table once and then one HTTP
+range per block out of the source files. Prefixing the URL with `jazav://` says what
+you expect to open and is otherwise the same. The host must serve the raw files in the
+same layout relative to the zarr that they have on disk, honour HTTP range requests on
+them, and allow cross-origin requests with the `Range` header and `Content-Range`
+exposed. S3, GCS, nginx and Caddy do; Python's `http.server` does not.
+
 ## Limitations
 
 `vizarr` was built to support the registration use case above where multiple, pyramidal OME-Zarr images
